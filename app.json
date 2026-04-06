@@ -1,0 +1,66 @@
+{
+  "expo": {
+    "name": "GenXAura",
+    "slug": "genxaura",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": false,
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#0F0F1A"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.genxaura.app",
+      "googleServicesFile": "./GoogleService-Info.plist",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "GenXAura uses your location to find nearby matches.",
+        "NSCameraUsageDescription": "GenXAura needs camera access to take profile photos.",
+        "NSPhotoLibraryUsageDescription": "GenXAura needs photo library access to upload profile photos."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0F0F1A"
+      },
+      "package": "com.genxaura.app",
+      "googleServicesFile": "./google-services.json",
+      "permissions": [
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "plugins": [
+      "@react-native-firebase/app",
+      "@react-native-firebase/auth",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow GenXAura to use your location."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow GenXAura to access your photos."
+        }
+      ],
+      "expo-secure-store"
+    ],
+    "scheme": "genxaura",
+    "extra": {
+      "eas": {
+        "projectId": "33577dad-4ff6-4659-8966-56e8fb767ad2"
+      }
+    },
+    "owner": "arun-96"
+  }
+}
