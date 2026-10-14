@@ -17,6 +17,7 @@ import { useUserStore } from '../../store/userStore';
 import { useAuthStore } from '../../store/authStore';
 import { useSubscriptionStore } from '../../store/subscriptionStore';
 import { COLORS, INTERESTS } from '../../constants';
+import { getApiErrorMessage } from '../../services/api';
 
 export default function ProfileScreen() {
   const calculateAge = (dob: Date): number => {
@@ -81,9 +82,12 @@ export default function ProfileScreen() {
     } as any);
 
     try {
-      await uploadPhoto(formData);
-    } catch {
-      Alert.alert('Error', 'Could not upload photo.');
+      const uploaded: any = await uploadPhoto(formData);
+      if (uploaded?.verificationStatus === 'pending') {
+        Alert.alert('Photo uploaded', 'Your photo is waiting for review by our team.');
+      }
+    } catch (err) {
+      Alert.alert('Could not upload photo', getApiErrorMessage(err, 'Please try again.'));
     }
   };
 
@@ -93,7 +97,13 @@ export default function ProfileScreen() {
       {
         text: 'Delete',
         style: 'destructive',
-        onPress: () => deletePhoto(storagePath),
+        onPress: async () => {
+          try {
+            await deletePhoto(storagePath);
+          } catch (err) {
+            Alert.alert('Could not delete photo', getApiErrorMessage(err, 'Please try again.'));
+          }
+        },
       },
     ]);
   };
@@ -326,7 +336,7 @@ export default function ProfileScreen() {
             onPress={() =>
               Alert.alert('Log out?', undefined, [
                 { text: 'Cancel', style: 'cancel' },
-                { text: 'Log Out', style: 'destructive', onPress: logout },
+                { text: 'Log Out', style: 'destructive', onPress: () => logout() },
               ])
             }
           >

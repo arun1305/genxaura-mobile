@@ -9,7 +9,23 @@ import {
   Alert,
 } from 'react-native';
 import { useSubscriptionStore } from '../../store/subscriptionStore';
-import { subscriptionApi } from '../../services/api';
+import { subscriptionApi, PurchaseProof } from '../../services/api';
+import { purchaseService, PRODUCT_IDS, showPurchaseError } from '../../services/purchaseService';
+
+/**
+ * Runs the store purchase, lets the backend verify + grant it, then finishes
+ * the store transaction. Entitlements are never granted client-side.
+ */
+async function buy<T>(productId: string, grant: (proof: PurchaseProof) => Promise<T>): Promise<T> {
+  const proof = await purchaseService.purchase(productId);
+  const result = await grant({
+    platform: proof.platform,
+    receipt: proof.receipt,
+    transactionId: proof.transactionId,
+  });
+  await proof.finish();
+  return result;
+}
 
 interface Pack {
   quantity: number;
@@ -55,10 +71,12 @@ export default function ShopScreen() {
   async function handleBuySuperLikes(index: number, pack: Pack) {
     setPurchasing(`sl-${index}`);
     try {
-      const { newBalance } = await purchaseSuperLikes(index);
+      const { newBalance } = await buy(PRODUCT_IDS.superLikes(index), (proof) =>
+        purchaseSuperLikes(index, proof),
+      );
       Alert.alert('Success', `${pack.quantity} Super Likes added! Balance: ${newBalance}`);
-    } catch (err: any) {
-      Alert.alert('Purchase Failed', err?.response?.data?.message || 'Please try again.');
+    } catch (err) {
+      showPurchaseError(err);
     } finally {
       setPurchasing(null);
     }
@@ -67,10 +85,12 @@ export default function ShopScreen() {
   async function handleBuyRoses(index: number, pack: Pack) {
     setPurchasing(`r-${index}`);
     try {
-      const { newBalance } = await purchaseRoses(index);
+      const { newBalance } = await buy(PRODUCT_IDS.roses(index), (proof) =>
+        purchaseRoses(index, proof),
+      );
       Alert.alert('Success', `${pack.quantity} Rose${pack.quantity > 1 ? 's' : ''} added! Balance: ${newBalance}`);
-    } catch (err: any) {
-      Alert.alert('Purchase Failed', err?.response?.data?.message || 'Please try again.');
+    } catch (err) {
+      showPurchaseError(err);
     } finally {
       setPurchasing(null);
     }
@@ -79,11 +99,11 @@ export default function ShopScreen() {
   async function handleBuyBoost() {
     setPurchasing('boost');
     try {
-      await purchaseBoost();
+      await buy(PRODUCT_IDS.boost, (proof) => purchaseBoost(proof));
       loadStatus();
       Alert.alert('Boost Active!', 'You appear #1 in local stack for the next 30 minutes.');
-    } catch (err: any) {
-      Alert.alert('Purchase Failed', err?.response?.data?.message || 'Please try again.');
+    } catch (err) {
+      showPurchaseError(err);
     } finally {
       setPurchasing(null);
     }
@@ -92,11 +112,11 @@ export default function ShopScreen() {
   async function handleBuySpotlight() {
     setPurchasing('spotlight');
     try {
-      await purchaseSpotlight();
+      await buy(PRODUCT_IDS.spotlight, (proof) => purchaseSpotlight(proof));
       loadStatus();
       Alert.alert('Spotlight Active!', 'You appear in Top Picks for the next 24 hours.');
-    } catch (err: any) {
-      Alert.alert('Purchase Failed', err?.response?.data?.message || 'Please try again.');
+    } catch (err) {
+      showPurchaseError(err);
     } finally {
       setPurchasing(null);
     }

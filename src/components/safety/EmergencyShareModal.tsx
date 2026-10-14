@@ -13,7 +13,12 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import * as Location from 'expo-location';
-import { verificationApi } from '../../services/api';
+import { verificationApi, getApiErrorMessage } from '../../services/api';
+import {
+  startEmergencyLocationTracking,
+  stopEmergencyLocationTracking,
+  sendEmergencyLocationNow,
+} from '../../services/emergencyShareTracker';
 import { COLORS } from '../../constants';
 
 interface Props {
@@ -26,7 +31,7 @@ type Duration = 2 | 4 | 8;
 interface ActiveShare {
   shareUrl: string;
   expiresAt: string; // ISO date string
-  venueName?: string;
+  dateVenueName?: string;
 }
 
 export default function EmergencyShareModal({ visible, onClose }: Props) {
@@ -70,10 +75,12 @@ export default function EmergencyShareModal({ visible, onClose }: Props) {
   const checkActiveShare = async () => {
     setLoading(true);
     try {
-      const { data } = await verificationApi.getActiveShare();
+      const { data } = await verificationApi.getActiveEmergencyShare();
       if (data?.data?.shareUrl) {
         setActiveShare(data.data);
         setShareUrl(data.data.shareUrl);
+        // Keep the live location flowing while the share is active.
+        startEmergencyLocationTracking(data.data.expiresAt);
       } else {
         setActiveShare(null);
       }
@@ -107,21 +114,37 @@ export default function EmergencyShareModal({ visible, onClose }: Props) {
     setCreating(true);
     try {
       const { data } = await verificationApi.createEmergencyShare({
-        venueName: venueName || undefined,
-        venueAddress: venueAddress || undefined,
-        personMeeting: personMeeting || undefined,
+        dateVenueName: venueName.trim() || undefined,
+        dateVenueAddress: venueAddress.trim() || undefined,
+        matchPersonName: personMeeting.trim() || undefined,
         durationHours: duration,
       });
       const url: string = data?.data?.shareUrl;
       const expiresAt: string = data?.data?.expiresAt;
       if (url) {
         setShareUrl(url);
-        setActiveShare({ shareUrl: url, expiresAt, venueName: venueName || undefined });
+        setActiveShare({ shareUrl: url, expiresAt, dateVenueName: venueName.trim() || undefined });
+        await ensureLocationPermission();
+        startEmergencyLocationTracking(expiresAt);
       }
-    } catch (err: any) {
-      Alert.alert('Error', err?.response?.data?.message ?? 'Could not create safety share. Please try again.');
+    } catch (err) {
+      Alert.alert('Error', getApiErrorMessage(err, 'Could not create safety share. Please try again.'));
     } finally {
       setCreating(false);
+    }
+  };
+
+  const ensureLocationPermission = async () => {
+    try {
+      const { granted } = await Location.requestForegroundPermissionsAsync();
+      if (!granted) {
+        Alert.alert(
+          'Location not shared',
+          'Your safety link works, but without location access your friend will only see the date details you entered.',
+        );
+      }
+    } catch {
+      /* ignore */
     }
   };
 
@@ -153,11 +176,10 @@ export default function EmergencyShareModal({ visible, onClose }: Props) {
         setUpdatingLocation(false);
         return;
       }
-      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-      await verificationApi.updateLocation(loc.coords.latitude, loc.coords.longitude);
-      Alert.alert('Location Updated', 'Your trusted friend can now see your current location.');
-    } catch {
-      Alert.alert('Error', 'Could not update your location. Please try again.');
+      await sendEmergencyLocationNow();
+      Alert.alert('Location Updated', 'Anyone with your safety link can now see your current location.');
+    } catch (err) {
+      Alert.alert('Error', getApiErrorMessage(err, 'Could not update your location. Please try again.'));
     } finally {
       setUpdatingLocation(false);
     }
@@ -176,6 +198,7 @@ export default function EmergencyShareModal({ visible, onClose }: Props) {
             setStopping(true);
             try {
               await verificationApi.deactivateShare();
+              stopEmergencyLocationTracking();
               setActiveShare(null);
               setShareUrl(null);
               setVenueName('');
@@ -250,6 +273,10 @@ export default function EmergencyShareModal({ visible, onClose }: Props) {
                   <Text style={styles.actionBtnPrimaryText}>↗ Share</Text>
                 </TouchableOpacity>
               </View>
+
+              <Text style={styles.subtitle}>
+                While the app is open, your location is sent to this link automatically every 2 minutes.
+              </Text>
 
               {/* Update Location */}
               <TouchableOpacity
@@ -354,7 +381,7 @@ export default function EmergencyShareModal({ visible, onClose }: Props) {
               </TouchableOpacity>
 
               <Text style={styles.footerNote}>
-                🔒 The link expires after your chosen duration and contains no personal information.
+                🔒 Anyone with the link can see your name, profile photo, the date details above and your latest shared location — until the link expires or you stop sharing.
               </Text>
             </ScrollView>
           )}

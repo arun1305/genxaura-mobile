@@ -19,9 +19,10 @@
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "GenXAura uses your location to find nearby matches.",
-        "NSCameraUsageDescription": "GenXAura needs camera access to take profile photos.",
+        "NSCameraUsageDescription": "GenXAura needs camera access to take profile photos and verification selfies.",
         "NSPhotoLibraryUsageDescription": "GenXAura needs photo library access to upload profile photos."
-      }
+      },
+      "usesAppleSignIn": true
     },
     "android": {
       "adaptiveIcon": {
@@ -41,6 +42,9 @@
     "plugins": [
       "@react-native-firebase/app",
       "@react-native-firebase/auth",
+      "@react-native-firebase/messaging",
+      "@react-native-google-signin/google-signin",
+      "expo-apple-authentication",
       [
         "expo-location",
         {
@@ -53,7 +57,14 @@
           "photosPermission": "Allow GenXAura to access your photos."
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow GenXAura to use your camera for verification selfies.",
+          "recordAudioAndroid": false
+        }
+      ]
     ],
     "scheme": "genxaura",
     "extra": {

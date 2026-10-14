@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -18,14 +18,17 @@ import * as ImagePicker from 'expo-image-picker';
 import * as Haptics from 'expo-haptics';
 import { ChatBubble } from '../../components/chat/ChatBubble';
 import GifPickerModal from '../../components/chat/GifPickerModal';
-import { useChatStore } from '../../store/chatStore';
+import SOSModal from '../../components/safety/SOSModal';
+import { useChatStore, Message } from '../../store/chatStore';
 import { useAuthStore } from '../../store/authStore';
-import { chatApi, moderationApi } from '../../services/api';
+import { useUserStore } from '../../store/userStore';
+import { chatApi, moderationApi, getApiErrorMessage } from '../../services/api';
 import { COLORS } from '../../constants';
 import socketService from '../../sockets/socketService';
 
-export default function ChatScreen() {
-  const formatLastActive = (date: Date): string => {
+const TYPING_IDLE_MS = 2000;
+
+const formatLastActive = (date: Date): string => {
   const diff = Date.now() - new Date(date).getTime();
   const minutes = Math.floor(diff / 60000);
   const hours = Math.floor(minutes / 60);
@@ -36,31 +39,39 @@ export default function ChatScreen() {
   if (days < 7) return `${days}d ago`;
   return new Date(date).toLocaleDateString();
 };
+
+export default function ChatScreen() {
   const route = useRoute<any>();
   const navigation = useNavigation<any>();
   const { matchId } = route.params;
 
-  const flatListRef = useRef<FlatList>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isTypingSentRef = useRef(false);
 
   const [inputText, setInputText] = useState('');
   const [isSending, setIsSending] = useState(false);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [showGifPicker, setShowGifPicker] = useState(false);
   const [showSOS, setShowSOS] = useState(false);
   const [flaggedMessageId, setFlaggedMessageId] = useState<string | null>(null);
   const tenorKeySet = !!process.env.EXPO_PUBLIC_TENOR_API_KEY;
 
-  const { user } = useAuthStore();
+  const authUserId = useAuthStore((s) => s.user?.id);
+  const profileUserId = useUserStore((s) => s.profile?.userId);
+  const myUserId = authUserId ?? profileUserId ?? null;
+
   const {
     messages,
     matches,
     typing,
     onlineUsers,
+    pagination,
+    loadMatches,
     loadMessages,
+    loadOlderMessages,
     sendMessage,
-    setTyping,
-    markRead,
+    retryMessage,
+    discardMessage,
+    deleteMessage,
     setActiveMatch,
     isLoadingMessages,
   } = useChatStore();
@@ -68,18 +79,44 @@ export default function ChatScreen() {
   const match = matches.find((m) => m._id === matchId);
   const otherUser = match?.otherUser;
   const currentMessages = messages[matchId] || [];
-  const isTyping = Object.values(typing[matchId] || {}).some(
-    (v) => v === true,
+  // Newest first for the inverted list.
+  const listData = useMemo(() => [...currentMessages].reverse(), [currentMessages]);
+  const hasMore = pagination[matchId]?.hasMore ?? false;
+  // Only the OTHER participant's typing state is shown.
+  const isTyping = Object.entries(typing[matchId] || {}).some(
+    ([uid, v]) => v === true && uid !== myUserId,
   );
   const isOnline = otherUser?.userId && onlineUsers.has(otherUser.userId);
   const isLoading = isLoadingMessages[matchId];
+  const isLoadingOlder = isLoading && currentMessages.length > 0;
+
+  const stopTyping = useCallback(() => {
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    typingTimerRef.current = null;
+    if (isTypingSentRef.current) {
+      isTypingSentRef.current = false;
+      socketService.sendTyping(matchId, false);
+    }
+  }, [matchId]);
 
   useEffect(() => {
-    setActiveMatch(matchId);
+    // Opened from a push / match popup before the match list was loaded.
+    if (!useChatStore.getState().matches.some((m) => m._id === matchId)) loadMatches();
+
+    setActiveMatch(matchId).then((res) => {
+      if (!res.ok && !res.transient) {
+        Alert.alert(
+          'Conversation unavailable',
+          res.error || 'This conversation is no longer available.',
+          [{ text: 'OK', onPress: () => navigation.goBack() }],
+        );
+      }
+    });
     loadMessages(matchId, 1);
 
     // Listen for flagged messages ("Does this bother you?")
-    const unsubFlag = socketService.onMessageFlagged(({ messageId, severity }) => {
+    const unsubFlag = socketService.onMessageFlagged(({ matchId: flaggedMatchId, messageId }) => {
+      if (flaggedMatchId && flaggedMatchId !== matchId) return;
       setFlaggedMessageId(messageId);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
       Alert.alert(
@@ -96,9 +133,12 @@ export default function ChatScreen() {
             style: 'destructive',
             onPress: async () => {
               await moderationApi.markMessageBothered(messageId).catch(() => {});
-              if (otherUser?.userId) {
+              const otherId = useChatStore
+                .getState()
+                .matches.find((m) => m._id === matchId)?.otherUser?.userId;
+              if (otherId) {
                 await moderationApi
-                  .submitReport(otherUser.userId, 'harassment', 'Offensive message', messageId, matchId)
+                  .submitReport(otherId, 'harassment', 'Offensive message', messageId, matchId)
                   .catch(() => {});
               }
               setFlaggedMessageId(null);
@@ -110,52 +150,75 @@ export default function ChatScreen() {
     });
 
     return () => {
+      stopTyping();
       setActiveMatch(null);
       unsubFlag();
     };
   }, [matchId]);
 
-  useEffect(() => {
-    if (currentMessages.length > 0) {
-      scrollToBottom(false);
+  const handleSendResult = useCallback((result: { ok: boolean; error?: string }) => {
+    if (result.ok) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } else {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     }
-  }, [currentMessages.length]);
-
-  const scrollToBottom = (animated = true) => {
-    flatListRef.current?.scrollToEnd({ animated });
-  };
+  }, []);
 
   const handleSend = useCallback(async () => {
     const text = inputText.trim();
     if (!text || isSending) return;
 
-    setInputText('');
+    stopTyping();
     setIsSending(true);
-
+    // The message stays visible (sending → sent / failed with retry), so the
+    // text is never silently lost.
+    setInputText('');
     try {
-      sendMessage(matchId, text, 'text');
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      const result = await sendMessage(matchId, text, 'text');
+      handleSendResult(result);
     } finally {
       setIsSending(false);
     }
-  }, [inputText, isSending, matchId, sendMessage]);
+  }, [inputText, isSending, matchId, sendMessage, stopTyping, handleSendResult]);
 
   const handleTyping = useCallback(
     (text: string) => {
       setInputText(text);
 
-      // Emit typing start
-      setTyping(matchId, user?._id || '', true);
+      if (!text) {
+        stopTyping();
+        return;
+      }
 
-      // Clear previous timer
+      // Emit "typing" once per burst, then "stopped" after 2s of inactivity.
+      if (!isTypingSentRef.current) {
+        isTypingSentRef.current = true;
+        socketService.sendTyping(matchId, true);
+      }
       if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
-
-      // Stop typing after 2s of inactivity
-      typingTimerRef.current = setTimeout(() => {
-        setTyping(matchId, user?._id || '', false);
-      }, 2000);
+      typingTimerRef.current = setTimeout(stopTyping, TYPING_IDLE_MS);
     },
-    [matchId, user, setTyping],
+    [matchId, stopTyping],
+  );
+
+  const handleFailedPress = useCallback(
+    (message: Message) => {
+      if (!message.clientId) return;
+      const clientId = message.clientId;
+      Alert.alert('Message not sent', message.error || 'This message could not be delivered.', [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => discardMessage(matchId, clientId),
+        },
+        {
+          text: 'Retry',
+          onPress: async () => handleSendResult(await retryMessage(matchId, clientId)),
+        },
+      ]);
+    },
+    [matchId, discardMessage, retryMessage, handleSendResult],
   );
 
   const handleImagePick = useCallback(async () => {
@@ -183,24 +246,22 @@ export default function ChatScreen() {
 
     try {
       const { data } = await chatApi.uploadImage(matchId, formData);
-      sendMessage(matchId, '📷 Photo', 'image', data.data.url);
+      handleSendResult(await sendMessage(matchId, '📷 Photo', 'image', data.data.url));
     } catch (err) {
-      Alert.alert('Upload failed', 'Could not send image. Please try again.');
+      Alert.alert('Upload failed', getApiErrorMessage(err, 'Could not send image. Please try again.'));
     }
-  }, [matchId, sendMessage]);
+  }, [matchId, sendMessage, handleSendResult]);
 
-  const handleLoadMore = useCallback(async () => {
-    if (isLoadingMore) return;
-    setIsLoadingMore(true);
-    const currentPage = Math.ceil(currentMessages.length / 50) + 1;
-    await loadMessages(matchId, currentPage);
-    setIsLoadingMore(false);
-  }, [isLoadingMore, currentMessages.length, matchId, loadMessages]);
+  const handleLoadOlder = useCallback(() => {
+    if (!hasMore || isLoading) return;
+    loadOlderMessages(matchId);
+  }, [hasMore, isLoading, matchId, loadOlderMessages]);
 
   const renderMessage = useCallback(
-    ({ item, index }: { item: any; index: number }) => {
-      const isOwn = item.senderId === user?._id;
-      const prevMsg = currentMessages[index - 1];
+    ({ item, index }: { item: Message; index: number }) => {
+      const isOwn = !!myUserId && item.senderId === myUserId;
+      // listData is newest-first, so the chronologically previous message is index + 1.
+      const prevMsg = listData[index + 1];
       const showTime =
         !prevMsg ||
         new Date(item.createdAt).getTime() -
@@ -212,15 +273,23 @@ export default function ChatScreen() {
           message={item}
           isOwn={isOwn}
           showTime={showTime}
+          onPressFailed={() => handleFailedPress(item)}
           onLongPress={() => {
-            if (isOwn) {
+            if (isOwn && !item.status && !item.isDeleted) {
               Alert.alert('Delete Message?', undefined, [
                 { text: 'Cancel', style: 'cancel' },
                 {
                   text: 'Delete',
                   style: 'destructive',
                   onPress: async () => {
-                    await chatApi.deleteMessage(item._id);
+                    try {
+                      await deleteMessage(matchId, item._id);
+                    } catch (err) {
+                      Alert.alert(
+                        'Could not delete message',
+                        getApiErrorMessage(err, 'Please try again.'),
+                      );
+                    }
                   },
                 },
               ]);
@@ -229,7 +298,7 @@ export default function ChatScreen() {
         />
       );
     },
-    [currentMessages, user],
+    [listData, myUserId, matchId, deleteMessage, handleFailedPress],
   );
 
   return (
@@ -245,6 +314,7 @@ export default function ChatScreen() {
 
         <TouchableOpacity
           style={styles.headerProfile}
+          disabled={!otherUser?.userId}
           onPress={() =>
             navigation.navigate('ViewProfile', {
               userId: otherUser?.userId,
@@ -310,38 +380,40 @@ export default function ChatScreen() {
           <View style={styles.loadingContainer}>
             <ActivityIndicator color={COLORS.primary} />
           </View>
+        ) : currentMessages.length === 0 ? (
+          // Rendered outside the inverted list (an inverted list flips its empty component).
+          <View style={[styles.emptyChat, { flex: 1 }]}>
+            <Image
+              source={{ uri: otherUser?.photos?.[0]?.url }}
+              style={styles.emptyChatAvatar}
+              contentFit="cover"
+            />
+            <Text style={styles.emptyChatName}>
+              You matched with {otherUser?.name}!
+            </Text>
+            <Text style={styles.emptyChatHint}>
+              Say hello and start the conversation 👋
+            </Text>
+          </View>
         ) : (
           <FlatList
-            ref={flatListRef}
-            data={currentMessages}
+            inverted
+            data={listData}
             renderItem={renderMessage}
             keyExtractor={(item) => item._id}
             contentContainerStyle={styles.messageList}
-            onEndReached={handleLoadMore}
+            // Inverted list: the "end" is the top of the conversation → older messages.
+            onEndReached={handleLoadOlder}
             onEndReachedThreshold={0.3}
-            ListHeaderComponent={
-              isLoadingMore ? (
+            ListFooterComponent={
+              isLoadingOlder ? (
                 <ActivityIndicator
                   color={COLORS.primary}
                   style={{ paddingVertical: 8 }}
                 />
               ) : null
             }
-            ListEmptyComponent={
-              <View style={styles.emptyChat}>
-                <Image
-                  source={{ uri: otherUser?.photos?.[0]?.url }}
-                  style={styles.emptyChatAvatar}
-                  contentFit="cover"
-                />
-                <Text style={styles.emptyChatName}>
-                  You matched with {otherUser?.name}!
-                </Text>
-                <Text style={styles.emptyChatHint}>
-                  Say hello and start the conversation 👋
-                </Text>
-              </View>
-            }
+            keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
           />
         )}
@@ -350,9 +422,8 @@ export default function ChatScreen() {
         <GifPickerModal
           visible={showGifPicker}
           onClose={() => setShowGifPicker(false)}
-          onSelect={(url) => {
-            sendMessage(matchId, url, 'gif', url);
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          onSelect={async (url) => {
+            handleSendResult(await sendMessage(matchId, url, 'gif', url));
           }}
         />
 
@@ -401,6 +472,13 @@ export default function ChatScreen() {
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
+
+      {/* Emergency */}
+      <SOSModal
+        visible={showSOS}
+        onClose={() => setShowSOS(false)}
+        matchName={otherUser?.name}
+      />
     </SafeAreaView>
   );
 }

@@ -1,5 +1,6 @@
-import React, { useEffect, useRef } from 'react';
-import { NavigationContainer } from '@react-navigation/native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { AppState } from 'react-native';
+import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { View, Text, ActivityIndicator, StyleSheet } from 'react-native';
@@ -9,7 +10,12 @@ import { COLORS } from '../constants';
 import {
   registerForPushNotificationsAsync,
   setupNotificationResponseHandler,
+  flushPendingNotification,
+  onPushTokenRefresh,
+  NotificationNavigator,
 } from '../services/notificationService';
+import { refreshLocationIfDue } from '../services/locationService';
+import { socketService } from '../sockets/socketService';
 import { useSubscriptionStore } from '../store/subscriptionStore';
 import { useNotificationStore } from '../store/notificationStore';
 
@@ -28,8 +34,11 @@ import VerificationScreen from '../screens/safety/VerificationScreen';
 import IDVerificationScreen from '../screens/safety/IDVerificationScreen';
 import PrivacyScreen from '../screens/safety/PrivacyScreen';
 import NotificationPreferencesScreen from '../screens/profile/NotificationPreferencesScreen';
+import SettingsScreen from '../screens/profile/SettingsScreen';
+import ViewProfileScreen from '../screens/profile/ViewProfileScreen';
 
 const Stack = createNativeStackNavigator();
+const navigationRef = createNavigationContainerRef<any>();
 const Tab = createBottomTabNavigator();
 
 function MainTabs() {
@@ -78,33 +87,81 @@ function MainTabs() {
 }
 
 export default function RootNavigator() {
-  const { isAuthenticated, isLoading, isOnboarded, hydrate, updateFcmToken } = useAuthStore();
+  const { isAuthenticated, isLoading, isOnboarded, hydrate, updateFcmToken, setOnboarded } =
+    useAuthStore();
   const { profile, loadProfile } = useUserStore();
   const { loadStatus: loadSubStatus } = useSubscriptionStore();
   const { loadPreferences: loadNotifPrefs } = useNotificationStore();
-  const navigationRef = useRef<any>(null);
+  const [navReady, setNavReady] = useState(false);
+
+  // Onboarding state comes from the server: user.isOnboarded (auth responses)
+  // and profile.isOnboarded (/profile/me) — not only from the onboarding screen.
+  const onboarded = isOnboarded || !!profile?.isOnboarded;
+  const mainMounted = isAuthenticated && onboarded;
 
   useEffect(() => {
     hydrate();
   }, []);
 
+  // Keep the persisted flag in sync with the latest profile from the server.
   useEffect(() => {
-    if (isAuthenticated) {
-      loadProfile();
-      loadSubStatus();
-      loadNotifPrefs();
-      // Register for push notifications and save FCM token
-      registerForPushNotificationsAsync().then((token) => {
-        if (token) updateFcmToken(token);
-      });
+    if (profile && profile.isOnboarded !== isOnboarded) {
+      setOnboarded(!!profile.isOnboarded);
     }
-  }, [isAuthenticated]);
+  }, [profile?.isOnboarded]);
 
   useEffect(() => {
-    if (!navigationRef.current) return;
-    const subscription = setupNotificationResponseHandler(navigationRef.current);
+    if (!isAuthenticated) return;
+    loadProfile();
+    loadSubStatus();
+    loadNotifPrefs();
+    // Register for push notifications and save the FCM token
+    registerForPushNotificationsAsync().then((token) => {
+      if (token) updateFcmToken(token);
+    });
+    const unsubTokenRefresh = onPushTokenRefresh((token) => updateFcmToken(token));
+    return unsubTokenRefresh;
+  }, [isAuthenticated]);
+
+  // Foreground work: reconnect the socket, refresh location (≤ once / 30 min).
+  useEffect(() => {
+    if (!mainMounted) return;
+    refreshLocationIfDue();
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') return;
+      socketService.connect().catch(() => undefined);
+      refreshLocationIfDue();
+    });
+    return () => sub.remove();
+  }, [mainMounted]);
+
+  // Notification taps only navigate when the target stack is mounted.
+  const notificationNav = useMemo<NotificationNavigator>(
+    () => ({
+      canNavigate: () => {
+        const { isAuthenticated: authed, isOnboarded: onb } = useAuthStore.getState();
+        const profOnb = !!useUserStore.getState().profile?.isOnboarded;
+        return navigationRef.isReady() && authed && (onb || profOnb);
+      },
+      navigate: (route, params) => navigationRef.navigate(route, params),
+    }),
+    [],
+  );
+
+  useEffect(() => {
+    const subscription = setupNotificationResponseHandler(notificationNav);
     return () => subscription.remove();
-  }, [navigationRef.current]);
+  }, [notificationNav]);
+
+  useEffect(() => {
+    if (navReady && mainMounted) {
+      // Give the newly mounted stack a tick before navigating.
+      const t = setTimeout(() => flushPendingNotification(notificationNav), 0);
+      return () => clearTimeout(t);
+    }
+  }, [navReady, mainMounted, notificationNav]);
+
+  const handleReady = useCallback(() => setNavReady(true), []);
 
   if (isLoading) {
     return (
@@ -117,11 +174,11 @@ export default function RootNavigator() {
   }
 
   return (
-    <NavigationContainer ref={navigationRef}>
+    <NavigationContainer ref={navigationRef} onReady={handleReady}>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         {!isAuthenticated ? (
           <Stack.Screen name="Login" component={LoginScreen} />
-        ) : !isOnboarded || !profile?.isOnboarded ? (
+        ) : !onboarded ? (
           <Stack.Screen
             name="Onboarding"
             component={OnboardingScreen}
@@ -174,6 +231,16 @@ export default function RootNavigator() {
               name="NotificationPreferences"
               component={NotificationPreferencesScreen}
               options={{ animation: 'slide_from_right' }}
+            />
+            <Stack.Screen
+              name="Settings"
+              component={SettingsScreen}
+              options={{ animation: 'slide_from_right' }}
+            />
+            <Stack.Screen
+              name="ViewProfile"
+              component={ViewProfileScreen}
+              options={{ animation: 'slide_from_bottom' }}
             />
           </>
         )}

@@ -12,6 +12,7 @@ import { useNavigation } from '@react-navigation/native';
 import { Image } from 'expo-image';
 import { useChatStore } from '../../store/chatStore';
 import { useAuthStore } from '../../store/authStore';
+import { useUserStore } from '../../store/userStore';
 import { COLORS } from '../../constants';
 
 export default function MatchListScreen() {
@@ -27,21 +28,22 @@ export default function MatchListScreen() {
   return new Date(date).toLocaleDateString();
 };
   const navigation = useNavigation<any>();
-  const { matches, loadMatches, isLoadingMatches, onlineUsers, initSocketListeners } =
-    useChatStore();
-  const { user } = useAuthStore();
+  const { matches, loadMatches, isLoadingMatches, onlineUsers } = useChatStore();
+  const authUserId = useAuthStore((st) => st.user?.id);
+  const profileUserId = useUserStore((st) => st.profile?.userId);
+  const myUserId = authUserId ?? profileUserId ?? null;
 
+  // Socket listeners are attached globally at session start (authStore);
+  // loadMatches also emits check_online for the matched users.
   useEffect(() => {
     loadMatches();
-    const cleanup = initSocketListeners();
-    return cleanup;
   }, []);
 
   const renderMatch = ({ item }: { item: any }) => {
     const otherUser = item.otherUser;
     const isOnline = otherUser?.userId && onlineUsers.has(otherUser.userId);
     const preview = item.lastMessagePreview;
-    const isOwnLast = preview?.senderId === user?._id;
+    const isOwnLast = !!myUserId && preview?.senderId === myUserId;
 
     return (
       <TouchableOpacity

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { subscriptionApi } from '../services/api';
+import { subscriptionApi, PurchaseProof } from '../services/api';
 
 export type SubscriptionTier = 'free' | 'gold' | 'platinum';
 
@@ -74,11 +74,12 @@ interface SubscriptionState {
   clearPassport: () => Promise<void>;
   setIncognito: (enabled: boolean) => Promise<void>;
 
-  // À-la-carte purchases
-  purchaseSuperLikes: (packIndex: number, transactionId?: string) => Promise<{ newBalance: number }>;
-  purchaseRoses: (packIndex: number, transactionId?: string) => Promise<{ newBalance: number }>;
-  purchaseBoost: (transactionId?: string) => Promise<void>;
-  purchaseSpotlight: (transactionId?: string) => Promise<void>;
+  // Purchases — always require a store receipt; entitlements come from the server only.
+  activateSubscription: (tier: 'gold' | 'platinum', durationDays: number, proof: PurchaseProof) => Promise<void>;
+  purchaseSuperLikes: (packIndex: number, proof: PurchaseProof) => Promise<{ newBalance: number }>;
+  purchaseRoses: (packIndex: number, proof: PurchaseProof) => Promise<{ newBalance: number }>;
+  purchaseBoost: (proof: PurchaseProof) => Promise<void>;
+  purchaseSpotlight: (proof: PurchaseProof) => Promise<void>;
   sendRose: (toUserId: string, message?: string) => Promise<void>;
   loadReceivedRoses: () => Promise<void>;
   markRoseSeen: (fromUserId: string) => Promise<void>;
@@ -89,6 +90,7 @@ interface SubscriptionState {
   canLike: () => boolean;
   canSuperLike: () => boolean;
   canUndo: () => boolean;
+  reset: () => void;
 }
 
 export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
@@ -150,8 +152,14 @@ export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
     }));
   },
 
-  purchaseSuperLikes: async (packIndex, transactionId) => {
-    const { data } = await subscriptionApi.purchaseSuperLikes(packIndex, transactionId);
+  activateSubscription: async (tier, durationDays, proof) => {
+    await subscriptionApi.activate(tier, durationDays, proof);
+    // Reload the authoritative status from the server.
+    await get().loadStatus();
+  },
+
+  purchaseSuperLikes: async (packIndex, proof) => {
+    const { data } = await subscriptionApi.purchaseSuperLikes(packIndex, proof);
     const newBalance = data.data.newBalance as number;
     set((state) => ({
       status: state.status ? { ...state.status, superLikesBalance: newBalance } : state.status,
@@ -159,8 +167,8 @@ export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
     return { newBalance };
   },
 
-  purchaseRoses: async (packIndex, transactionId) => {
-    const { data } = await subscriptionApi.purchaseRoses(packIndex, transactionId);
+  purchaseRoses: async (packIndex, proof) => {
+    const { data } = await subscriptionApi.purchaseRoses(packIndex, proof);
     const newBalance = data.data.newBalance as number;
     set((state) => ({
       status: state.status ? { ...state.status, rosesBalance: newBalance } : state.status,
@@ -168,8 +176,8 @@ export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
     return { newBalance };
   },
 
-  purchaseBoost: async (transactionId) => {
-    const { data } = await subscriptionApi.purchaseBoost(transactionId);
+  purchaseBoost: async (proof) => {
+    const { data } = await subscriptionApi.purchaseBoost(proof);
     set((state) => ({
       status: state.status
         ? { ...state.status, isBoostActive: true, boostExpiresAt: data.data.expiresAt }
@@ -177,8 +185,8 @@ export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
     }));
   },
 
-  purchaseSpotlight: async (transactionId) => {
-    const { data } = await subscriptionApi.purchaseSpotlight(transactionId);
+  purchaseSpotlight: async (proof) => {
+    const { data } = await subscriptionApi.purchaseSpotlight(proof);
     set((state) => ({
       status: state.status
         ? { ...state.status, isSpotlightActive: true, spotlightExpiresAt: data.data.expiresAt }
@@ -241,4 +249,6 @@ export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
     if (s.limits.unlimitedUndos) return true;
     return (s.remaining.undos ?? 0) > 0;
   },
+
+  reset: () => set({ status: null, likedMe: [], receivedRoses: [], isLoading: false }),
 }));

@@ -5,6 +5,7 @@ import {
   Text,
   Dimensions,
   TouchableOpacity,
+  ViewStyle,
 } from 'react-native';
 import Animated, {
   useAnimatedStyle,
@@ -135,7 +136,7 @@ export const SwipeCard: React.FC<SwipeCardProps> = ({
       }
     });
 
-  const cardStyle = useAnimatedStyle(() => {
+  const cardStyle = useAnimatedStyle((): ViewStyle => {
     const rotate = interpolate(
       translateX.value,
       [-SCREEN_WIDTH / 2, 0, SCREEN_WIDTH / 2],
@@ -153,7 +154,7 @@ export const SwipeCard: React.FC<SwipeCardProps> = ({
         { translateY: translateY.value },
         { rotate: `${rotate}deg` },
         { scale },
-      ],
+      ] as ViewStyle['transform'],
     };
   });
 

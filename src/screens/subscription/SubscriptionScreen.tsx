@@ -13,7 +13,7 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSubscriptionStore } from '../../store/subscriptionStore';
-import { subscriptionApi } from '../../services/api';
+import { purchaseService, PRODUCT_IDS, showPurchaseError } from '../../services/purchaseService';
 import { COLORS } from '../../constants';
 
 const GOLD_COLOR = '#F5C518';
@@ -49,7 +49,7 @@ const PRICES: Record<Plan, Record<Duration, string>> = {
 
 export default function SubscriptionScreen() {
   const navigation = useNavigation<any>();
-  const { status, loadStatus } = useSubscriptionStore();
+  const { status, loadStatus, activateSubscription } = useSubscriptionStore();
   const [selectedPlan, setSelectedPlan] = useState<Plan>('gold');
   const [selectedDuration, setSelectedDuration] = useState<Duration>(1);
   const [purchasing, setPurchasing] = useState(false);
@@ -61,18 +61,25 @@ export default function SubscriptionScreen() {
   const handleSubscribe = async () => {
     setPurchasing(true);
     try {
-      // In production: integrate with expo-iap or RevenueCat here.
-      // For now, call the activate endpoint directly (test/dev mode).
+      // 1. Store purchase (throws if IAP is not configured — no fake receipts).
+      const proof = await purchaseService.purchase(
+        PRODUCT_IDS.subscription(selectedPlan, selectedDuration),
+      );
+      // 2. Backend verifies the receipt and grants the entitlement (402/409 on failure).
       const durationDays = selectedDuration * 30;
-      await subscriptionApi.activate(selectedPlan, durationDays, `mock_${Date.now()}`);
-      await loadStatus();
+      await activateSubscription(selectedPlan, durationDays, {
+        platform: proof.platform,
+        receipt: proof.receipt,
+        transactionId: proof.transactionId,
+      });
+      await proof.finish();
       Alert.alert(
         '🎉 Welcome to GenXAura ' + (selectedPlan === 'platinum' ? 'Platinum' : 'Gold') + '!',
         'Your subscription is now active.',
         [{ text: 'Get Started', onPress: () => navigation.goBack() }],
       );
-    } catch (err: any) {
-      Alert.alert('Purchase Failed', err?.response?.data?.message || 'Please try again.');
+    } catch (err) {
+      showPurchaseError(err);
     } finally {
       setPurchasing(false);
     }

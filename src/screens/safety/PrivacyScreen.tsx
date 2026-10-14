@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -6,26 +6,21 @@ import {
   SafeAreaView,
   ScrollView,
   TouchableOpacity,
-  Switch,
   Alert,
+  Share,
   TextInput,
   Modal,
   ActivityIndicator,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { usersApi, moderationApi } from '../../services/api';
+import { usersApi, moderationApi, getApiErrorMessage } from '../../services/api';
 import { useAuthStore } from '../../store/authStore';
 import { COLORS } from '../../constants';
-
-const PRECISE_LOCATION_KEY = 'settings_precise_location';
 
 export default function PrivacyScreen() {
   const navigation = useNavigation<any>();
   const { logout } = useAuthStore();
 
-  const [precisLocation, setPrecisLocation] = useState(false);
-  const [locationLoading, setLocationLoading] = useState(true);
   const [exportLoading, setExportLoading] = useState(false);
 
   // Delete account flow
@@ -34,41 +29,24 @@ export default function PrivacyScreen() {
   const [deleteText, setDeleteText] = useState('');
   const [deleting, setDeleting] = useState(false);
 
-  useEffect(() => {
-    loadLocationPreference();
-  }, []);
-
-  const loadLocationPreference = async () => {
-    try {
-      const val = await AsyncStorage.getItem(PRECISE_LOCATION_KEY);
-      setPrecisLocation(val === 'true');
-    } catch {
-      // ignore
-    } finally {
-      setLocationLoading(false);
-    }
-  };
-
-  const handleLocationToggle = async (value: boolean) => {
-    setPrecisLocation(value);
-    try {
-      await AsyncStorage.setItem(PRECISE_LOCATION_KEY, String(value));
-    } catch {
-      // ignore
-    }
-  };
-
+  /**
+   * Downloads the GDPR export (GET /moderation/gdpr/export) and hands the JSON
+   * to the OS share sheet so the user can save it (Files, Drive, email to self…).
+   */
   const handleExportData = async () => {
     setExportLoading(true);
     try {
-      await moderationApi.exportGDPRData();
-      Alert.alert(
-        'Data Export Requested',
-        'Your data export will be ready shortly. We\'ll email it to your registered address.',
-        [{ text: 'OK' }],
-      );
-    } catch {
-      Alert.alert('Error', 'Could not process your export request. Please try again later.');
+      const { data } = await moderationApi.exportGDPRData();
+      const json = JSON.stringify(data?.data ?? data, null, 2);
+      const result = await Share.share({
+        title: 'My GenXAura data export',
+        message: json,
+      });
+      if (result.action === Share.sharedAction) {
+        Alert.alert('Export ready', 'Your data export (JSON) was handed to the app you selected.');
+      }
+    } catch (err) {
+      Alert.alert('Export failed', getApiErrorMessage(err, 'Could not export your data. Please try again later.'));
     } finally {
       setExportLoading(false);
     }
@@ -126,7 +104,7 @@ export default function PrivacyScreen() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Download My Data</Text>
           <Text style={styles.cardDesc}>
-            Under GDPR and CCPA, you have the right to access all personal data we hold about you. We'll send a full export to your email.
+            Under GDPR and CCPA, you have the right to access all personal data we hold about you. Tap below to download a full export (JSON) right now and save or send it with your device's share sheet.
           </Text>
           <TouchableOpacity
             style={[styles.outlineBtn, exportLoading && styles.btnDisabled]}
@@ -136,7 +114,7 @@ export default function PrivacyScreen() {
             {exportLoading ? (
               <ActivityIndicator size="small" color={COLORS.primary} />
             ) : (
-              <Text style={styles.outlineBtnText}>📥 Request Data Export</Text>
+              <Text style={styles.outlineBtnText}>📥 Download My Data</Text>
             )}
           </TouchableOpacity>
         </View>
@@ -144,28 +122,14 @@ export default function PrivacyScreen() {
         {/* ── LOCATION ────────────────────────────────────────────────── */}
         <SectionHeader title="Location" />
         <View style={styles.card}>
-          <View style={styles.rowBetween}>
-            <View style={styles.rowLabel}>
-              <Text style={styles.cardTitle}>Share Precise Location</Text>
-              <Text style={styles.cardDesc}>
-                Precise location shows matches within an exact distance. When off, we use an approximate city-level location.
-              </Text>
-            </View>
-            {locationLoading ? (
-              <ActivityIndicator size="small" color={COLORS.primary} />
-            ) : (
-              <Switch
-                value={precisLocation}
-                onValueChange={handleLocationToggle}
-                trackColor={{ false: COLORS.border, true: `${COLORS.primary}80` }}
-                thumbColor={precisLocation ? COLORS.primary : COLORS.textMuted}
-              />
-            )}
-          </View>
+          <Text style={styles.cardTitle}>How Your Location Is Used</Text>
+          <Text style={styles.cardDesc}>
+            While you use the app, your location is updated (at most every 30 minutes) to calculate distances to other people. You can turn location access off at any time in your device settings.
+          </Text>
           <View style={styles.infoRow}>
             <Text style={styles.infoIcon}>📍</Text>
             <Text style={styles.infoText}>
-              Location data is only used for matching and is never sold to third parties.
+              Other users only see your city and an approximate distance — never your coordinates.
             </Text>
           </View>
         </View>
@@ -192,7 +156,7 @@ export default function PrivacyScreen() {
         {/* ── DATA REQUESTS (GDPR) ─────────────────────────────────────── */}
         <SectionHeader title="Your Rights (GDPR)" />
         <View style={styles.card}>
-          <Text style={styles.cardDesc} style={{ marginBottom: 12 }}>
+          <Text style={[styles.cardDesc, { marginBottom: 12 }]}>
             Under the General Data Protection Regulation (GDPR), you have the following rights:
           </Text>
           {[
@@ -254,7 +218,7 @@ export default function PrivacyScreen() {
         <View style={[styles.card, styles.dangerCard]}>
           <Text style={styles.dangerTitle}>Delete Account</Text>
           <Text style={styles.dangerDesc}>
-            Permanently deletes your profile, matches, messages, and all associated data. This cannot be undone.
+            Permanently deletes your account and all data we hold about you — profile, photos, matches, messages, swipes, verification submissions and purchase records. This cannot be undone.
           </Text>
           <TouchableOpacity style={styles.deleteBtn} onPress={handleDeleteAccountPress}>
             <Text style={styles.deleteBtnText}>Delete My Account</Text>
@@ -281,7 +245,7 @@ export default function PrivacyScreen() {
                   Are you absolutely sure? This will permanently delete:
                 </Text>
                 <View style={{ gap: 6, marginVertical: 12 }}>
-                  {['Your profile and photos', 'All matches and conversations', 'Your subscription and purchase history', 'All personal data'].map((item) => (
+                  {['Your account, profile and photos', 'All matches and conversations', 'Your swipes, verification submissions and safety shares', 'Your subscription and purchase records', 'All other personal data we hold about you'].map((item) => (
                     <Text key={item} style={styles.deleteListItem}>• {item}</Text>
                   ))}
                 </View>

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -14,12 +14,53 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import auth from '@react-native-firebase/auth';
+import axios from 'axios';
 import { useAuthStore } from '../../store/authStore';
+import { getApiErrorMessage } from '../../services/api';
+import {
+  getGoogleFirebaseIdToken,
+  getAppleFirebaseIdToken,
+  isAppleSignInAvailable,
+  isGoogleSignInConfigured,
+  SocialSignInCancelledError,
+} from '../../services/socialAuth';
 import { COLORS } from '../../constants';
 
 const { width } = Dimensions.get('window');
 
 type Step = 'welcome' | 'phone' | 'otp';
+
+/**
+ * Normalises user input to E.164: strips spaces, dashes, parentheses and dots,
+ * keeps a leading "+", converts a leading "00" international prefix to "+".
+ * Returns null if the result is not a plausible E.164 number.
+ */
+export function normalizePhoneE164(input: string): string | null {
+  let p = input.trim().replace(/[\s\-().]/g, '');
+  if (p.startsWith('00')) p = `+${p.slice(2)}`;
+  if (!p.startsWith('+')) p = `+${p}`;
+  return /^\+[1-9]\d{6,14}$/.test(p) ? p : null;
+}
+
+const FIREBASE_AUTH_MESSAGES: Record<string, string> = {
+  'auth/invalid-phone-number': 'That phone number is not valid. Include your country code, e.g. +1 555 000 0000.',
+  'auth/invalid-verification-code': 'The code you entered is incorrect.',
+  'auth/code-expired': 'This code has expired. Please request a new one.',
+  'auth/session-expired': 'This code has expired. Please request a new one.',
+  'auth/too-many-requests': 'Too many attempts. Please wait a while and try again.',
+  'auth/network-request-failed': 'Network error. Check your connection and try again.',
+  'auth/account-exists-with-different-credential':
+    'An account already exists with the same email but a different sign-in method.',
+  'auth/user-disabled': 'This account has been disabled.',
+};
+
+/** User-facing message for Firebase, social-provider and API errors. */
+function authErrorMessage(err: any, fallback: string): string {
+  if (axios.isAxiosError(err)) return getApiErrorMessage(err, fallback);
+  const code: string | undefined = err?.code;
+  if (code && FIREBASE_AUTH_MESSAGES[code]) return FIREBASE_AUTH_MESSAGES[code];
+  return err?.message || fallback;
+}
 
 export default function LoginScreen() {
   const [step, setStep] = useState<Step>('welcome');
@@ -29,13 +70,19 @@ export default function LoginScreen() {
   const [confirmation, setConfirmation] = useState<any>(null);
   const otpInputRef = useRef<TextInput>(null);
 
-  const { loginWithPhone, loginWithGoogle } = useAuthStore();
+  const [appleAvailable, setAppleAvailable] = useState(false);
+
+  const { loginWithPhone, loginWithGoogle, loginWithApple } = useAuthStore();
+
+  useEffect(() => {
+    isAppleSignInAvailable().then(setAppleAvailable);
+  }, []);
 
   // ── Send OTP ──────────────────────────────────────────────────────
   const handleSendOtp = async () => {
-    const formatted = (phone.startsWith('+') ? phone : `+${phone}`).replace(/\s+/g, '');
-    if (formatted.length < 8) {
-      Alert.alert('Invalid phone', 'Enter a valid phone number with country code.');
+    const formatted = normalizePhoneE164(phone);
+    if (!formatted) {
+      Alert.alert('Invalid phone', 'Enter a valid phone number including your country code, e.g. +1 555 000 0000.');
       return;
     }
     setLoading(true);
@@ -45,7 +92,7 @@ export default function LoginScreen() {
       setStep('otp');
       setTimeout(() => otpInputRef.current?.focus(), 200);
     } catch (err: any) {
-      Alert.alert('Error', err.message || 'Failed to send OTP. Try again.');
+      Alert.alert('Could not send code', authErrorMessage(err, 'Failed to send the code. Please try again.'));
     } finally {
       setLoading(false);
     }
@@ -57,17 +104,20 @@ export default function LoginScreen() {
       Alert.alert('Invalid OTP', 'Enter the 6-digit code.');
       return;
     }
+    const formatted = normalizePhoneE164(phone);
+    if (!formatted || !confirmation) {
+      Alert.alert('Invalid phone', 'Please go back and re-enter your phone number.');
+      return;
+    }
     setLoading(true);
     try {
       const result = await confirmation.confirm(otp);
       const idToken = await result.user.getIdToken();
-      const formatted = (phone.startsWith('+') ? phone : `+${phone}`).replace(/\s+/g, '');
-      console.log('[OTP] sending phone:', formatted);
-      const { isNew } = await loginWithPhone(formatted, idToken);
+      await loginWithPhone(formatted, idToken);
       // Navigation handled by root navigator based on auth state
     } catch (err: any) {
-      console.error('[OTP Error] code:', err?.code, 'message:', err?.message);
-      Alert.alert('Error', err?.code + ': ' + err?.message);
+      console.warn('[OTP] verification failed:', err?.code ?? err?.response?.status);
+      Alert.alert('Verification failed', authErrorMessage(err, 'Could not verify the code. Please try again.'));
     } finally {
       setLoading(false);
     }
@@ -75,14 +125,31 @@ export default function LoginScreen() {
 
   // ── Google Sign-In ────────────────────────────────────────────────
   const handleGoogleSignIn = async () => {
+    if (!isGoogleSignInConfigured()) {
+      Alert.alert('Unavailable', 'Google sign-in is not configured.');
+      return;
+    }
     setLoading(true);
     try {
-      const { idToken } = await auth().signInWithPopup(
-        new (auth as any).GoogleAuthProvider(),
-      );
+      const idToken = await getGoogleFirebaseIdToken();
       await loginWithGoogle(idToken);
     } catch (err: any) {
-      Alert.alert('Google Sign-In failed', err.message);
+      if (err instanceof SocialSignInCancelledError) return;
+      Alert.alert('Google Sign-In failed', authErrorMessage(err, 'Please try again.'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ── Apple Sign-In (iOS) ───────────────────────────────────────────
+  const handleAppleSignIn = async () => {
+    setLoading(true);
+    try {
+      const { idToken, fullName } = await getAppleFirebaseIdToken();
+      await loginWithApple(idToken, fullName);
+    } catch (err: any) {
+      if (err instanceof SocialSignInCancelledError) return;
+      Alert.alert('Apple Sign-In failed', authErrorMessage(err, 'Please try again.'));
     } finally {
       setLoading(false);
     }
@@ -118,16 +185,26 @@ export default function LoginScreen() {
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={styles.socialBtn}
+              style={[styles.socialBtn, loading && styles.continueBtnDisabled]}
               onPress={handleGoogleSignIn}
               disabled={loading}
             >
-              <Text style={styles.socialBtnText}>🔵 Continue with Google</Text>
+              {loading ? (
+                <ActivityIndicator color={COLORS.text} />
+              ) : (
+                <Text style={styles.socialBtnText}>🔵 Continue with Google</Text>
+              )}
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.socialBtn}>
-              <Text style={styles.socialBtnText}>🍎 Continue with Apple</Text>
-            </TouchableOpacity>
+            {appleAvailable && (
+              <TouchableOpacity
+                style={[styles.socialBtn, loading && styles.continueBtnDisabled]}
+                onPress={handleAppleSignIn}
+                disabled={loading}
+              >
+                <Text style={styles.socialBtnText}>🍎 Continue with Apple</Text>
+              </TouchableOpacity>
+            )}
           </View>
 
           <Text style={styles.terms}>

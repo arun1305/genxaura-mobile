@@ -14,7 +14,7 @@ import { useNavigation } from '@react-navigation/native';
 import { Image } from 'expo-image';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
-import { verificationApi } from '../../services/api';
+import { verificationApi, getApiErrorMessage } from '../../services/api';
 import { COLORS } from '../../constants';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -22,7 +22,7 @@ const OVAL_WIDTH = SCREEN_WIDTH * 0.65;
 const OVAL_HEIGHT = OVAL_WIDTH * 1.3;
 
 type Step = 'intro' | 'camera' | 'preview' | 'loading' | 'success' | 'failure';
-type VerificationStatus = 'pending' | 'approved' | 'rejected' | 'unverified';
+type VerificationStatus = 'pending' | 'approved' | 'rejected' | 'needs_retry' | 'unverified';
 
 export default function VerificationScreen() {
   const navigation = useNavigation<any>();
@@ -30,6 +30,8 @@ export default function VerificationScreen() {
   const [capturedUri, setCapturedUri] = useState<string | null>(null);
   const [status, setStatus] = useState<VerificationStatus>('unverified');
   const [statusLoading, setStatusLoading] = useState(true);
+  const [failureReason, setFailureReason] = useState<'needs_retry' | 'error'>('needs_retry');
+  const [failureMessage, setFailureMessage] = useState<string | null>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
 
@@ -40,7 +42,8 @@ export default function VerificationScreen() {
   const loadStatus = async () => {
     try {
       const { data } = await verificationApi.getStatus();
-      setStatus(data?.data?.livenessStatus ?? 'unverified');
+      // Backend shape: { liveness: {status, submittedAt}|null, id: {...}|null }
+      setStatus((data?.data?.liveness?.status as VerificationStatus) ?? 'unverified');
     } catch {
       // ignore
     } finally {
@@ -95,16 +98,26 @@ export default function VerificationScreen() {
     if (!capturedUri) return;
     setStep('loading');
     try {
-      // Upload the selfie as a file first
       const filename = capturedUri.split('/').pop() ?? 'selfie.jpg';
+      const ext = filename.split('.').pop()?.toLowerCase();
+      const mimeType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
       const formData = new FormData();
-      formData.append('photo', { uri: capturedUri, name: filename, type: 'image/jpeg' } as any);
+      formData.append('selfie', { uri: capturedUri, name: filename, type: mimeType } as any);
 
-      // Submit liveness check with the local URI (backend handles upload internally)
-      await verificationApi.submitLiveness(capturedUri);
-      setStatus('pending');
-      setStep('success');
-    } catch {
+      const { data } = await verificationApi.submitLiveness(formData);
+      const result = (data?.data?.status as VerificationStatus) ?? 'pending';
+      setStatus(result);
+      if (result === 'needs_retry') {
+        // No single face detected — ask the user to retake the selfie.
+        setFailureReason('needs_retry');
+        setFailureMessage(null);
+        setStep('failure');
+      } else {
+        setStep('success');
+      }
+    } catch (err) {
+      setFailureReason('error');
+      setFailureMessage(getApiErrorMessage(err, 'Could not submit your selfie. Please try again.'));
       setStep('failure');
     }
   };
@@ -120,6 +133,7 @@ export default function VerificationScreen() {
       approved: { label: '✅ Verified', color: '#4CAF50', bg: '#4CAF5020' },
       pending: { label: '⏳ Pending Review', color: COLORS.warning, bg: `${COLORS.warning}20` },
       rejected: { label: '❌ Rejected', color: COLORS.error, bg: `${COLORS.error}20` },
+      needs_retry: { label: '↻ Retake Needed', color: COLORS.warning, bg: `${COLORS.warning}20` },
       unverified: { label: '○ Not Verified', color: COLORS.textMuted, bg: `${COLORS.surface}` },
     };
     const cfg = config[status];
@@ -154,8 +168,8 @@ export default function VerificationScreen() {
           <View style={styles.infoCardList}>
             {[
               { icon: '🔒', text: 'Your photo is never shared publicly' },
-              { icon: '🤖', text: 'AI checks for a real, live face' },
-              { icon: '⚡', text: 'Results in seconds' },
+              { icon: '🤖', text: 'We check that a single face is clearly visible' },
+              { icon: '👀', text: 'A member of our team reviews every submission' },
               { icon: '✅', text: 'Earn a verified badge on your profile' },
             ].map(({ icon, text }) => (
               <View key={text} style={styles.infoRow}>
@@ -259,7 +273,7 @@ export default function VerificationScreen() {
       <SafeAreaView style={styles.container}>
         <View style={styles.centeredFull}>
           <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.loadingText}>Analysing your photo...</Text>
+          <Text style={styles.loadingText}>Uploading your selfie...</Text>
           <Text style={styles.loadingSubtext}>This usually takes just a moment</Text>
         </View>
       </SafeAreaView>
@@ -281,9 +295,9 @@ export default function VerificationScreen() {
           <View style={styles.successCircle}>
             <Text style={styles.successIcon}>✓</Text>
           </View>
-          <Text style={styles.successTitle}>Verification Complete!</Text>
+          <Text style={styles.successTitle}>Submitted — Under Review</Text>
           <Text style={styles.successSubtitle}>
-            Your photo has been submitted for review. You'll receive a verified badge once approved.
+            Your selfie has been submitted and is under review by our team. You'll receive a verified badge once it is approved.
           </Text>
           <TouchableOpacity style={[styles.primaryBtn, { marginTop: 32 }]} onPress={() => navigation.goBack()}>
             <Text style={styles.primaryBtnText}>Done</Text>
@@ -308,9 +322,13 @@ export default function VerificationScreen() {
           <View style={styles.failureCircle}>
             <Text style={styles.failureIcon}>✕</Text>
           </View>
-          <Text style={styles.failureTitle}>Verification Failed</Text>
+          <Text style={styles.failureTitle}>
+            {failureReason === 'needs_retry' ? 'Please Retake Your Selfie' : 'Submission Failed'}
+          </Text>
           <Text style={styles.failureSubtitle}>
-            Couldn't detect a clear face. Please try again in good lighting.
+            {failureReason === 'needs_retry'
+              ? "We couldn't detect exactly one clear face. Please retake the photo in good lighting."
+              : failureMessage}
           </Text>
           <View style={styles.failureTips}>
             {[
@@ -322,7 +340,9 @@ export default function VerificationScreen() {
             ))}
           </View>
           <TouchableOpacity style={[styles.primaryBtn, { marginTop: 24 }]} onPress={handleRetry}>
-            <Text style={styles.primaryBtnText}>Try Again</Text>
+            <Text style={styles.primaryBtnText}>
+              {failureReason === 'needs_retry' ? 'Retake Selfie' : 'Try Again'}
+            </Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>

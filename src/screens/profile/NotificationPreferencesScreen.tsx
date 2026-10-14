@@ -61,7 +61,7 @@ const MATCHES_ROWS: ToggleRowConfig[] = [
     key: 'likedYou',
     icon: '❤️',
     title: 'Someone Liked You',
-    subtitle: 'See who's interested in you',
+    subtitle: "See who's interested in you",
     badge: 'Gold+',
   },
 ];

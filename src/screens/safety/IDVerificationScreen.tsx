@@ -12,12 +12,12 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
-import { verificationApi, profileApi } from '../../services/api';
+import { verificationApi, getApiErrorMessage } from '../../services/api';
 import { COLORS } from '../../constants';
 
 type IDType = 'passport' | 'drivers_license' | 'national_id';
-type SubmitStatus = 'idle' | 'uploading' | 'submitting' | 'done' | 'error';
-type ReviewStatus = 'unverified' | 'pending' | 'approved' | 'rejected';
+type SubmitStatus = 'idle' | 'uploading' | 'done' | 'error';
+type ReviewStatus = 'unverified' | 'pending' | 'approved' | 'rejected' | 'needs_retry';
 
 const ID_TYPES: { key: IDType; label: string }[] = [
   { key: 'passport', label: 'Passport' },
@@ -32,6 +32,7 @@ export default function IDVerificationScreen() {
   const [submitStatus, setSubmitStatus] = useState<SubmitStatus>('idle');
   const [reviewStatus, setReviewStatus] = useState<ReviewStatus>('unverified');
   const [statusLoading, setStatusLoading] = useState(true);
+  const [rejectionReason, setRejectionReason] = useState<string | null>(null);
 
   useEffect(() => {
     loadStatus();
@@ -40,8 +41,11 @@ export default function IDVerificationScreen() {
   const loadStatus = async () => {
     try {
       const { data } = await verificationApi.getStatus();
-      const s = data?.data?.idStatus ?? 'unverified';
-      setReviewStatus(s as ReviewStatus);
+      // Backend shape: { liveness: {status}|null, id: {status, idType, rejectionReason}|null }
+      const id = data?.data?.id;
+      setReviewStatus((id?.status as ReviewStatus) ?? 'unverified');
+      setRejectionReason(id?.rejectionReason ?? null);
+      if (id?.idType) setSelectedType(id.idType as IDType);
     } catch {
       // ignore
     } finally {
@@ -72,24 +76,22 @@ export default function IDVerificationScreen() {
     }
     setSubmitStatus('uploading');
     try {
-      // Step 1: Upload the photo to get a URL
-      const filename = imageUri.split('/').pop() ?? 'id_photo.jpg';
+      // The ID document is sent to the dedicated verification endpoint, where it is
+      // stored privately. It must NEVER go through /profile/photos (public).
+      const filename = imageUri.split('/').pop() ?? 'id_document.jpg';
+      const ext = filename.split('.').pop()?.toLowerCase();
+      const mimeType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
       const formData = new FormData();
-      formData.append('photo', { uri: imageUri, name: filename, type: 'image/jpeg' } as any);
-      const { data: uploadData } = await profileApi.uploadPhoto(formData);
-      const uploadedUrl: string = uploadData?.data?.url ?? uploadData?.data?.photos?.[0]?.url;
+      formData.append('document', { uri: imageUri, name: filename, type: mimeType } as any);
+      formData.append('idType', selectedType);
+      const { data } = await verificationApi.submitIDVerification(formData);
 
-      if (!uploadedUrl) throw new Error('Upload failed');
-
-      // Step 2: Submit ID verification with the URL
-      setSubmitStatus('submitting');
-      await verificationApi.submitIDVerification(uploadedUrl, selectedType);
-
-      setReviewStatus('pending');
+      setReviewStatus((data?.data?.status as ReviewStatus) ?? 'pending');
+      setRejectionReason(null);
       setSubmitStatus('done');
     } catch (err: any) {
       setSubmitStatus('error');
-      Alert.alert('Submission Failed', err?.response?.data?.message ?? 'Something went wrong. Please try again.');
+      Alert.alert('Submission Failed', getApiErrorMessage(err, 'Something went wrong. Please try again.'));
     }
   };
 
@@ -139,12 +141,12 @@ export default function IDVerificationScreen() {
           </View>
           <Text style={styles.pendingTitle}>Under Review</Text>
           <Text style={styles.pendingSubtitle}>
-            Your ID is under review. We'll notify you within 24 hours.
+            Your ID has been submitted and is waiting for review by our trust & safety team.
           </Text>
           <View style={styles.privacyNote}>
             <Text style={styles.lockIcon}>🔒</Text>
             <Text style={styles.privacyText}>
-              Your ID is encrypted, stored securely, and deleted after review.
+              Your ID is stored privately and is never shown on your profile.
             </Text>
           </View>
           <TouchableOpacity style={[styles.outlineBtn, { marginTop: 32 }]} onPress={() => navigation.goBack()}>
@@ -156,7 +158,7 @@ export default function IDVerificationScreen() {
   }
 
   // ─── MAIN UPLOAD FORM ─────────────────────────────────────────────────────
-  const isSubmitting = submitStatus === 'uploading' || submitStatus === 'submitting';
+  const isSubmitting = submitStatus === 'uploading';
 
   return (
     <SafeAreaView style={styles.container}>
@@ -179,15 +181,16 @@ export default function IDVerificationScreen() {
             <Text style={styles.shieldIconSmall}>🛡️</Text>
             <Text style={styles.infoCardTitle}>ID Verification</Text>
             <Text style={styles.infoCardText}>
-              ID Verification earns you a verified badge. We review IDs within 24 hours and immediately delete them after verification.
+              ID Verification earns you a verified badge once our trust & safety team has reviewed your document.
             </Text>
           </View>
 
           {/* Rejected notice */}
-          {reviewStatus === 'rejected' && (
+          {(reviewStatus === 'rejected' || reviewStatus === 'needs_retry') && (
             <View style={styles.rejectedBanner}>
               <Text style={styles.rejectedText}>
-                ❌ Your previous ID submission was rejected. Please submit a clearer image.
+                ❌ Your previous ID submission was not accepted
+                {rejectionReason ? `: ${rejectionReason}` : '.'} Please submit a clear photo of your document.
               </Text>
             </View>
           )}
@@ -218,11 +221,6 @@ export default function IDVerificationScreen() {
             {imageUri ? (
               <View style={styles.imagePreviewContainer}>
                 <Image source={{ uri: imageUri }} style={styles.idPreviewImage} contentFit="cover" />
-                <View style={styles.blurHintOverlay}>
-                  <Text style={styles.blurHintText}>
-                    Sensitive information will be blurred before storage
-                  </Text>
-                </View>
                 <TouchableOpacity style={styles.changePhotoBtn} onPress={handlePickImage}>
                   <Text style={styles.changePhotoBtnText}>Change Photo</Text>
                 </TouchableOpacity>
@@ -245,7 +243,7 @@ export default function IDVerificationScreen() {
           <View style={styles.privacyCard}>
             <Text style={styles.lockIconMed}>🔒</Text>
             <Text style={styles.privacyCardText}>
-              Your ID is encrypted, stored securely, and deleted after review. We never share it with third parties.
+              Your ID is stored privately and is never shown on your profile. We never share it with third parties.
             </Text>
           </View>
 
@@ -259,7 +257,7 @@ export default function IDVerificationScreen() {
               <View style={styles.loadingRow}>
                 <ActivityIndicator size="small" color="#FFFFFF" />
                 <Text style={styles.primaryBtnText}>
-                  {submitStatus === 'uploading' ? 'Uploading...' : 'Submitting...'}
+                  Uploading...
                 </Text>
               </View>
             ) : (
@@ -274,7 +272,7 @@ export default function IDVerificationScreen() {
           )}
 
           <Text style={styles.footerNote}>
-            By submitting, you agree that your ID will be reviewed by our trust & safety team and deleted immediately afterward.
+            By submitting, you agree that your ID will be reviewed by our trust & safety team.
           </Text>
         </ScrollView>
       )}

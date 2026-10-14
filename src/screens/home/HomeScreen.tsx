@@ -15,7 +15,7 @@ import { SwipeActions } from '../../components/swipe/SwipeActions';
 import { MatchPopup } from '../../components/common/MatchPopup';
 import BlockReportModal from '../../components/common/BlockReportModal';
 import BoostBanner from '../../components/common/BoostBanner';
-import { useSwipeStore } from '../../store/swipeStore';
+import { useSwipeStore, SwipeResult, SwipeError } from '../../store/swipeStore';
 import { useUserStore } from '../../store/userStore';
 import { useSubscriptionStore } from '../../store/subscriptionStore';
 import { COLORS } from '../../constants';
@@ -26,7 +26,7 @@ export default function HomeScreen() {
     profiles,
     currentIndex,
     isLoading,
-    hasMore,
+    deckVersion,
     lastMatch,
     loadProfiles,
     swipeLike,
@@ -37,7 +37,7 @@ export default function HomeScreen() {
   } = useSwipeStore();
 
   const { profile: myProfile } = useUserStore();
-  const { status: subStatus, sendRose } = useSubscriptionStore();
+  const { status: subStatus, sendRose, canUndo, loadStatus: loadSubStatus } = useSubscriptionStore();
   const [blockReportTarget, setBlockReportTarget] = useState<{ userId: string; name: string } | null>(null);
   const handleSendRose = useCallback((userId: string, name: string) => {
     Alert.alert(
@@ -73,20 +73,65 @@ export default function HomeScreen() {
   const isEmpty = visibleProfiles.length === 0 && !isLoading;
   const topProfile = visibleProfiles[0];
 
+  const showSwipeError = useCallback(
+    (error: SwipeError, title = "Couldn't complete that") => {
+      if (error.isLimit) {
+        // Limit reached: the card stays in the deck — offer an upgrade.
+        loadSubStatus();
+        Alert.alert('Limit reached', error.message, [
+          { text: 'Not now', style: 'cancel' },
+          { text: 'Upgrade', onPress: () => navigation.navigate('Subscription') },
+        ]);
+        return;
+      }
+      if (error.status === 404) {
+        Alert.alert('Profile unavailable', error.message || 'This profile is no longer available.');
+        return;
+      }
+      Alert.alert(title, error.message);
+    },
+    [navigation, loadSubStatus],
+  );
+
+  const handleResult = useCallback(
+    (result: SwipeResult) => {
+      if (!result.ok && result.error) showSwipeError(result.error);
+    },
+    [showSwipeError],
+  );
+
   const handleLike = useCallback(async () => {
     if (!topProfile) return;
-    await swipeLike(topProfile.userId);
-  }, [topProfile, swipeLike]);
+    handleResult(await swipeLike(topProfile.userId));
+  }, [topProfile, swipeLike, handleResult]);
 
   const handleNope = useCallback(async () => {
     if (!topProfile) return;
-    await swipeNope(topProfile.userId);
-  }, [topProfile, swipeNope]);
+    handleResult(await swipeNope(topProfile.userId));
+  }, [topProfile, swipeNope, handleResult]);
 
   const handleSuperLike = useCallback(async () => {
     if (!topProfile) return;
-    await swipeSuperLike(topProfile.userId);
-  }, [topProfile, swipeSuperLike]);
+    const result = await swipeSuperLike(topProfile.userId);
+    handleResult(result);
+    if (result.ok) loadSubStatus(); // refresh super-like balance / remaining
+  }, [topProfile, swipeSuperLike, handleResult, loadSubStatus]);
+
+  const handleUndo = useCallback(async () => {
+    if (!canUndo()) {
+      Alert.alert('No rewinds left', 'Upgrade to rewind more swipes.', [
+        { text: 'Not now', style: 'cancel' },
+        { text: 'Upgrade', onPress: () => navigation.navigate('Subscription') },
+      ]);
+      return;
+    }
+    const result = await undoSwipe();
+    if (result.ok) {
+      loadSubStatus();
+    } else if (result.error) {
+      showSwipeError(result.error, "Couldn't undo");
+    }
+  }, [canUndo, undoSwipe, navigation, showSwipeError, loadSubStatus]);
 
   const handleMatchMessage = useCallback(() => {
     if (!lastMatch) return;
@@ -157,7 +202,7 @@ export default function HomeScreen() {
                 const isTop = stackIndex === 0;
                 return (
                   <SwipeCard
-                    key={profile._id}
+                    key={`${profile._id}-${deckVersion}`}
                     profile={profile}
                     isTop={isTop}
                     index={stackIndex}
@@ -180,7 +225,7 @@ export default function HomeScreen() {
             onNope={handleNope}
             onLike={handleLike}
             onSuperLike={handleSuperLike}
-            onUndo={undoSwipe}
+            onUndo={handleUndo}
             canUndo={currentIndex > 0}
             disabled={!topProfile}
           />

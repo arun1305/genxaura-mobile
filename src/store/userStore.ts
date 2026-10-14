@@ -1,14 +1,14 @@
 import { create } from 'zustand';
-import { profileApi } from '../services/api';
+import { profileApi, getErrorStatus } from '../services/api';
 
-interface Photo {
+export interface Photo {
   url: string;
   storagePath: string;
   order: number;
   isMain: boolean;
 }
 
-interface UserProfile {
+export interface UserProfile {
   _id: string;
   userId: string;
   name: string;
@@ -18,7 +18,7 @@ interface UserProfile {
   bio: string;
   interests: string[];
   photos: Photo[];
-  location?: { coordinates: [number, number]; city?: string; country?: string };
+  location?: { coordinates?: [number, number]; city?: string; country?: string };
   preferences: {
     minAge: number;
     maxAge: number;
@@ -32,8 +32,11 @@ interface UserState {
   profile: UserProfile | null;
   isLoading: boolean;
   error: string | null;
+  /** True when GET /profile/me returned 404 (account without a profile yet). */
+  profileMissing: boolean;
 
-  loadProfile: () => Promise<void>;
+  /** Loads /profile/me. Resolves with the profile, or null on failure. */
+  loadProfile: () => Promise<UserProfile | null>;
   updateProfile: (data: Partial<UserProfile>) => Promise<void>;
   updateLocation: (lat: number, lng: number, city?: string, country?: string) => Promise<void>;
   uploadPhoto: (formData: FormData) => Promise<{ url: string; storagePath: string }>;
@@ -41,20 +44,24 @@ interface UserState {
   reorderPhotos: (order: string[]) => Promise<void>;
   completeOnboarding: () => Promise<void>;
   setProfile: (profile: UserProfile) => void;
+  reset: () => void;
 }
 
 export const useUserStore = create<UserState>((set, get) => ({
   profile: null,
   isLoading: false,
   error: null,
+  profileMissing: false,
 
   loadProfile: async () => {
     set({ isLoading: true, error: null });
     try {
       const { data } = await profileApi.getMyProfile();
-      set({ profile: data.data });
+      set({ profile: data.data, profileMissing: false });
+      return data.data as UserProfile;
     } catch (err: any) {
-      set({ error: err.message });
+      set({ error: err.message, profileMissing: getErrorStatus(err) === 404 });
+      return null;
     } finally {
       set({ isLoading: false });
     }
@@ -82,8 +89,8 @@ export const useUserStore = create<UserState>((set, get) => ({
               ...state.profile,
               location: {
                 coordinates: [lng, lat],
-                city,
-                country,
+                city: city ?? state.profile.location?.city,
+                country: country ?? state.profile.location?.country,
               },
             }
           : null,
@@ -124,4 +131,6 @@ export const useUserStore = create<UserState>((set, get) => ({
   },
 
   setProfile: (profile) => set({ profile }),
+
+  reset: () => set({ profile: null, isLoading: false, error: null, profileMissing: false }),
 }));

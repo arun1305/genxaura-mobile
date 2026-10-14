@@ -20,6 +20,7 @@ interface NotificationState {
   isLoading: boolean;
   loadPreferences: () => Promise<void>;
   updatePreference: (key: keyof NotificationPreferences, value: boolean | number) => Promise<void>;
+  reset: () => void;
 }
 
 const DEFAULT_PREFS: NotificationPreferences = {
@@ -68,4 +69,6 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
       throw err;
     }
   },
+
+  reset: () => set({ prefs: null, isLoading: false }),
 }));

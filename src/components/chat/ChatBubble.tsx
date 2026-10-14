@@ -1,7 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { Image } from 'expo-image';
-import { formatLastActive } from '../../../../../packages/utils';
 import { COLORS } from '../../constants';
 
 interface ChatBubbleProps {
@@ -15,10 +14,14 @@ interface ChatBubbleProps {
     createdAt: string;
     senderId: string;
     isDeleted?: boolean;
+    /** Local delivery state for own messages ('sending' | 'failed'); undefined = sent. */
+    status?: 'sending' | 'sent' | 'failed';
   };
   isOwn: boolean;
   showTime?: boolean;
   onLongPress?: () => void;
+  /** Tapped a message that failed to send (retry / discard). */
+  onPressFailed?: () => void;
 }
 
 export const ChatBubble: React.FC<ChatBubbleProps> = ({
@@ -26,8 +29,11 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
   isOwn,
   showTime = false,
   onLongPress,
+  onPressFailed,
 }) => {
   const isDeleted = message.isDeleted;
+  const isFailed = message.status === 'failed';
+  const isSending = message.status === 'sending';
 
   const renderContent = () => {
     if (isDeleted) {
@@ -65,18 +71,26 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
     <View style={[styles.container, isOwn ? styles.ownContainer : styles.otherContainer]}>
       <TouchableOpacity
         onLongPress={onLongPress}
+        onPress={isFailed ? onPressFailed : undefined}
         activeOpacity={0.85}
         style={[
           styles.bubble,
           isOwn ? styles.ownBubble : styles.otherBubble,
           isDeleted && styles.deletedBubble,
           message.type === 'image' && styles.imageBubble,
+          (isSending || isFailed) && styles.pendingBubble,
         ]}
       >
         {renderContent()}
       </TouchableOpacity>
 
-      {(showTime || isOwn) && (
+      {isFailed && (
+        <TouchableOpacity onPress={onPressFailed}>
+          <Text style={styles.failedText}>⚠️ Not sent · Tap to retry</Text>
+        </TouchableOpacity>
+      )}
+
+      {(showTime || isOwn) && !isFailed && (
         <View style={[styles.meta, isOwn && styles.ownMeta]}>
           {showTime && (
             <Text style={styles.time}>
@@ -88,7 +102,7 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
           )}
           {isOwn && (
             <Text style={[styles.readStatus, message.read && styles.readStatusSeen]}>
-              {message.read ? '✓✓' : '✓'}
+              {isSending ? '🕓' : message.read ? '✓✓' : '✓'}
             </Text>
           )}
         </View>
@@ -98,6 +112,15 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
 };
 
 const styles = StyleSheet.create({
+  pendingBubble: {
+    opacity: 0.6,
+  },
+  failedText: {
+    fontSize: 11,
+    color: COLORS.error,
+    marginTop: 3,
+    fontWeight: '600',
+  },
   container: {
     marginVertical: 3,
     maxWidth: '80%',
